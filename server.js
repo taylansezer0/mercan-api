@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
+const cheerio = require("cheerio");
 
 const app = express();
 
@@ -16,7 +17,7 @@ app.get("/", (req, res) => {
 
 /*
 |--------------------------------------------------------------------------
-| SearchAll (Mevcut çalışan endpoint)
+| SearchAll
 |--------------------------------------------------------------------------
 */
 
@@ -106,22 +107,14 @@ app.get("/model-page", async (req, res) => {
 
         });
 
+        const $ = cheerio.load(response.data);
+
+        const products = $('[data-toggle="product"]');
+
         res.json({
-
             success: true,
-            status: response.status,
-            type: typeof response.data,
-
-            preview:
-                typeof response.data === "string"
-                    ? response.data.substring(0, 500)
-                    : response.data,
-
-            length:
-                typeof response.data === "string"
-                    ? response.data.length
-                    : 0
-
+            count: products.length,
+            first: products.first().toString()
         });
 
     } catch (e) {
@@ -134,7 +127,6 @@ app.get("/model-page", async (req, res) => {
     }
 
 });
-
 
 const PORT = process.env.PORT || 3333;
 
