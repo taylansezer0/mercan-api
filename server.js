@@ -1,3 +1,4 @@
+const cheerio = require("cheerio");
 console.log(__filename);
 
 const express = require("express");
@@ -15,27 +16,38 @@ app.get("/", (req, res) => {
     });
 });
 
-app.get("/model", async (req, res) => {
+app.get("/category", async (req, res) => {
 
     try {
 
-        const model = req.query.code;
+        const link = req.query.link || "koleksiyonlar";
 
-        if (!model) {
-            return res.status(400).json({
+        const filterUrl =
+            `https://eu.mercanoptik.com/srv/service/filter/get/filters-variants-categories-brands-price-models-suppliers?link=${encodeURIComponent(link)}&language=tr&currency=TL`;
+
+        const filterResponse = await axios.get(filterUrl);
+
+        const models = filterResponse.data.MODELS || [];
+
+        if (!models.length) {
+            return res.json({
                 success: false,
-                message: "Model kodu gerekli."
+                message: "Model bulunamadı."
             });
         }
 
-        const url =
-            "https://eu.mercanoptik.com/srv/service/product/searchAll/" +
-            encodeURIComponent(model) +
-            "?language=tr";
+        const firstModel = models[0];
 
-        const response = await axios.get(url);
+        const pageUrl =
+            `https://eu.mercanoptik.com/${link}?model=${firstModel.ID}`;
 
-        res.json(response.data);
+        const html = await axios.get(pageUrl);
+
+        res.json({
+            success: true,
+            model: firstModel,
+            htmlLength: html.data.length
+        });
 
     } catch (e) {
 
