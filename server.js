@@ -89,17 +89,23 @@ app.post("/related-products", async (req, res) => {
             });
         }
 
-        const groups = {};
+        //---------------------------------------
+        // Model listesini 1 kez al
+        //---------------------------------------
+
+        const filterResponse = await axios.get(
+            `${BASE_URL}/srv/service/filter/get/filters-variants-categories-brands-price-models-suppliers?link=koleksiyonlar&language=tr&currency=TL`
+        );
+
+        const models = filterResponse.data.MODELS || [];
+
+        const items = [];
 
         await Promise.all(
 
             productIds.map(async (productId) => {
 
                 try {
-
-                    //------------------------------------------
-                    // Önce related-products
-                    //------------------------------------------
 
                     const relatedUrl =
                         `${BASE_URL}/srv/service/product/get-related-products/${productId}/1`;
@@ -108,9 +114,9 @@ app.post("/related-products", async (req, res) => {
 
                     let products = relatedResponse.data.PRODUCTS || [];
 
-                    //------------------------------------------
-                    // İlişkili ürün yoksa searchAll fallback
-                    //------------------------------------------
+                    //----------------------------------
+                    // related yoksa searchAll fallback
+                    //----------------------------------
 
                     if (products.length <= 1) {
 
@@ -118,16 +124,6 @@ app.post("/related-products", async (req, res) => {
 
                         if (products.length) {
                             currentTitle = products[0].TITLE || "";
-                        } else {
-
-                            const page = await axios.get(
-                                `${BASE_URL}/product/${productId}`
-                            ).catch(() => null);
-
-                            if (page?.data?.TITLE) {
-                                currentTitle = page.data.TITLE;
-                            }
-
                         }
 
                         if (currentTitle) {
@@ -136,45 +132,51 @@ app.post("/related-products", async (req, res) => {
                                 .replace(/[-].*$/, "")
                                 .trim();
 
-                            const searchUrl =
-                                `${BASE_URL}/srv/service/product/searchAll/${encodeURIComponent(modelName)}?language=tr`;
-
-                            const searchResponse = await axios.get(searchUrl);
+                            const searchResponse = await axios.get(
+                                `${BASE_URL}/srv/service/product/searchAll/${encodeURIComponent(modelName)}?language=tr`
+                            );
 
                             products = searchResponse.data.products || [];
-
                         }
 
                     }
 
                     if (!products.length) return;
 
-                    //------------------------------------------
-                    // Grup adı
-                    //------------------------------------------
+                    //----------------------------------
+                    // Model adı
+                    //----------------------------------
 
                     const first = products[0];
 
-                    const title =
-                        first.TITLE ||
-                        first.title ||
-                        "";
+                    const modelName =
+                        (first.TITLE || first.title || "")
+                            .replace(/[-].*$/, "")
+                            .trim();
 
-                    const modelName = title
-                        .replace(/[-].*$/, "")
-                        .trim();
+                    //----------------------------------
+                    // Model ID
+                    //----------------------------------
 
-                    groups[modelName] = products;
+                    const modelInfo = models.find(x => x.NAME === modelName);
+
+                    items.push({
+
+                        productId,
+
+                        model: modelName,
+
+                        modelId: modelInfo ? modelInfo.ID : null,
+
+                        totalProducts: products.length
+
+                    });
 
                 }
 
                 catch (err) {
 
-                    console.log(
-                        "Related Error:",
-                        productId,
-                        err.message
-                    );
+                    console.log(productId, err.message);
 
                 }
 
@@ -186,9 +188,9 @@ app.post("/related-products", async (req, res) => {
 
             success: true,
 
-            totalGroups: Object.keys(groups).length,
+            total: items.length,
 
-            groups
+            items
 
         });
 
