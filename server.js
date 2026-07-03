@@ -1,6 +1,3 @@
-const cheerio = require("cheerio");
-console.log(__filename);
-
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
@@ -8,6 +5,7 @@ const axios = require("axios");
 const app = express();
 
 app.use(cors());
+app.use(express.json());
 
 app.get("/", (req, res) => {
     res.json({
@@ -16,46 +14,38 @@ app.get("/", (req, res) => {
     });
 });
 
-app.get("/category", async (req, res) => {
-
+app.post("/models", async (req, res) => {
     try {
 
-        const link = req.query.link || "koleksiyonlar";
-
-        const filterUrl =
-            `https://eu.mercanoptik.com/srv/service/filter/get/filters-variants-categories-brands-price-models-suppliers?link=${encodeURIComponent(link)}&language=tr&currency=TL`;
-
-        const filterResponse = await axios.get(filterUrl);
-
-        const models = filterResponse.data.MODELS || [];
+        const models = req.body.models || [];
 
         if (!models.length) {
-            return res.json({
+            return res.status(400).json({
                 success: false,
-                message: "Model bulunamadı."
+                message: "Model listesi boş."
             });
         }
 
-        const firstModel = models[0];
+        const result = {};
 
-        const pageUrl =
-            `https://eu.mercanoptik.com/${link}?model=${firstModel.ID}`;
+        await Promise.all(
+            models.map(async (model) => {
 
-        const html = await axios.get(pageUrl, {
-            headers: {
-                "User-Agent":
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/149 Safari/537.36",
-                "Accept-Language": "tr-TR,tr;q=0.9",
-                "Referer": "https://eu.mercanoptik.com/" + link
-            }
-        });
+                const url =
+                    "https://eu.mercanoptik.com/srv/service/product/searchAll/" +
+                    encodeURIComponent(model) +
+                    "?language=tr";
+
+                const response = await axios.get(url);
+
+                result[model] = response.data.products || [];
+
+            })
+        );
 
         res.json({
             success: true,
-            model: firstModel,
-            status: html.status,
-            htmlLength: html.data.length,
-            preview: html.data.substring(0, 300)
+            groups: result
         });
 
     } catch (e) {
@@ -66,7 +56,6 @@ app.get("/category", async (req, res) => {
         });
 
     }
-
 });
 
 const PORT = process.env.PORT || 3333;
