@@ -70,6 +70,104 @@ app.post("/models", async (req, res) => {
 
 /*
 |--------------------------------------------------------------------------
+| Related Products (YENİ)
+|--------------------------------------------------------------------------
+*/
+
+app.post("/related-products", async (req, res) => {
+
+    try {
+
+        const productIds = req.body.productIds || [];
+
+        if (!productIds.length) {
+            return res.status(400).json({
+                success: false,
+                message: "productIds boş."
+            });
+        }
+
+        const groups = {};
+
+        await Promise.all(
+
+            productIds.map(async (productId) => {
+
+                try {
+
+                    const relatedUrl =
+                        `https://eu.mercanoptik.com/srv/service/product/get-related-products/${productId}/1`;
+
+                    const relatedResponse = await axios.get(relatedUrl);
+
+                    let products = relatedResponse.data.PRODUCTS || [];
+
+                    // Eğer panelde ilgili ürün tanımlı değilse fallback
+                    if (products.length <= 1) {
+
+                        const current = products[0];
+
+                        if (current && current.TITLE) {
+
+                            const model = current.TITLE
+                                .replace(/[-].*$/, "")
+                                .trim();
+
+                            const searchUrl =
+                                "https://eu.mercanoptik.com/srv/service/product/searchAll/" +
+                                encodeURIComponent(model) +
+                                "?language=tr";
+
+                            const searchResponse = await axios.get(searchUrl);
+
+                            products = searchResponse.data.products || [];
+
+                        }
+
+                    }
+
+                    if (!products.length) return;
+
+                    const title =
+                        products[0].TITLE ||
+                        products[0].title ||
+                        "";
+
+                    const modelName = title
+                        .replace(/[-].*$/, "")
+                        .trim();
+
+                    groups[modelName] = products;
+
+                } catch (err) {
+
+                    console.log("Product Error:", productId, err.message);
+
+                }
+
+            })
+
+        );
+
+        res.json({
+            success: true,
+            groups
+        });
+
+    } catch (e) {
+
+        res.status(500).json({
+            success: false,
+            error: e.message
+        });
+
+    }
+
+});
+
+
+/*
+|--------------------------------------------------------------------------
 | HTML TEST
 |--------------------------------------------------------------------------
 */
@@ -108,28 +206,46 @@ app.get("/model-page", async (req, res) => {
         });
 
         const $ = cheerio.load(response.data);
-            
+
         const products = [];
-            
+
         $('[data-toggle="product"]').each((i, el) => {
+
             products.push({
-                id: $(el).attr('data-id'),
-                title: $(el).find('[data-toggle="product-title"]').text().trim(),
-                href: $(el).find('[data-toggle="product-url"]').attr('href')
+
+                id: $(el).attr("data-id"),
+
+                title: $(el)
+                    .find('[data-toggle="product-title"]')
+                    .text()
+                    .trim(),
+
+                href: $(el)
+                    .find('[data-toggle="product-url"]')
+                    .attr("href")
+
             });
+
         });
-        
+
         res.json({
+
             success: true,
+
             count: products.length,
+
             products
+
         });
 
     } catch (e) {
 
         res.status(500).json({
+
             success: false,
+
             error: e.message
+
         });
 
     }
