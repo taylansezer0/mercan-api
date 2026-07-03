@@ -41,12 +41,21 @@ app.get("/category", async (req, res) => {
         const pageUrl =
             `https://eu.mercanoptik.com/${link}?model=${firstModel.ID}`;
 
-        const html = await axios.get(pageUrl);
+        const html = await axios.get(pageUrl, {
+            headers: {
+                "User-Agent":
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/149 Safari/537.36",
+                "Accept-Language": "tr-TR,tr;q=0.9",
+                "Referer": "https://eu.mercanoptik.com/" + link
+            }
+        });
 
         res.json({
             success: true,
             model: firstModel,
-            htmlLength: html.data.length
+            status: html.status,
+            htmlLength: html.data.length,
+            preview: html.data.substring(0, 300)
         });
 
     } catch (e) {
