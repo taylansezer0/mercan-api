@@ -8,6 +8,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+const BASE_URL = "https://eu.mercanoptik.com";
+
 app.get("/", (req, res) => {
     res.json({
         success: true,
@@ -34,116 +36,18 @@ app.post("/models", async (req, res) => {
             });
         }
 
-        const result = {};
-
-        await Promise.all(
-            models.map(async (model) => {
-
-                const url =
-                    "https://eu.mercanoptik.com/srv/service/product/searchAll/" +
-                    encodeURIComponent(model) +
-                    "?language=tr";
-
-                const response = await axios.get(url);
-
-                result[model] = response.data.products || [];
-
-            })
-        );
-
-        res.json({
-            success: true,
-            groups: result
-        });
-
-    } catch (e) {
-
-        res.status(500).json({
-            success: false,
-            error: e.message
-        });
-
-    }
-
-});
-
-
-/*
-|--------------------------------------------------------------------------
-| Related Products (YENİ)
-|--------------------------------------------------------------------------
-*/
-
-app.post("/related-products", async (req, res) => {
-
-    try {
-
-        const productIds = req.body.productIds || [];
-
-        if (!productIds.length) {
-            return res.status(400).json({
-                success: false,
-                message: "productIds boş."
-            });
-        }
-
         const groups = {};
 
         await Promise.all(
 
-            productIds.map(async (productId) => {
+            models.map(async (model) => {
 
-                try {
+                const url =
+                    `${BASE_URL}/srv/service/product/searchAll/${encodeURIComponent(model)}?language=tr`;
 
-                    const relatedUrl =
-                        `https://eu.mercanoptik.com/srv/service/product/get-related-products/${productId}/1`;
+                const response = await axios.get(url);
 
-                    const relatedResponse = await axios.get(relatedUrl);
-
-                    let products = relatedResponse.data.PRODUCTS || [];
-
-                    // Eğer panelde ilgili ürün tanımlı değilse fallback
-                    if (products.length <= 1) {
-
-                        const current = products[0];
-
-                        if (current && current.TITLE) {
-
-                            const model = current.TITLE
-                                .replace(/[-].*$/, "")
-                                .trim();
-
-                            const searchUrl =
-                                "https://eu.mercanoptik.com/srv/service/product/searchAll/" +
-                                encodeURIComponent(model) +
-                                "?language=tr";
-
-                            const searchResponse = await axios.get(searchUrl);
-
-                            products = searchResponse.data.products || [];
-
-                        }
-
-                    }
-
-                    if (!products.length) return;
-
-                    const title =
-                        products[0].TITLE ||
-                        products[0].title ||
-                        "";
-
-                    const modelName = title
-                        .replace(/[-].*$/, "")
-                        .trim();
-
-                    groups[modelName] = products;
-
-                } catch (err) {
-
-                    console.log("Product Error:", productId, err.message);
-
-                }
+                groups[model] = response.data.products || [];
 
             })
 
@@ -168,6 +72,145 @@ app.post("/related-products", async (req, res) => {
 
 /*
 |--------------------------------------------------------------------------
+| Related Products
+|--------------------------------------------------------------------------
+*/
+
+app.post("/related-products", async (req, res) => {
+
+    try {
+
+        const productIds = req.body.productIds || [];
+
+        if (!productIds.length) {
+            return res.status(400).json({
+                success: false,
+                message: "productIds boş."
+            });
+        }
+
+        const groups = {};
+
+        await Promise.all(
+
+            productIds.map(async (productId) => {
+
+                try {
+
+                    //------------------------------------------
+                    // Önce related-products
+                    //------------------------------------------
+
+                    const relatedUrl =
+                        `${BASE_URL}/srv/service/product/get-related-products/${productId}/1`;
+
+                    const relatedResponse = await axios.get(relatedUrl);
+
+                    let products = relatedResponse.data.PRODUCTS || [];
+
+                    //------------------------------------------
+                    // İlişkili ürün yoksa searchAll fallback
+                    //------------------------------------------
+
+                    if (products.length <= 1) {
+
+                        let currentTitle = "";
+
+                        if (products.length) {
+                            currentTitle = products[0].TITLE || "";
+                        } else {
+
+                            const page = await axios.get(
+                                `${BASE_URL}/product/${productId}`
+                            ).catch(() => null);
+
+                            if (page?.data?.TITLE) {
+                                currentTitle = page.data.TITLE;
+                            }
+
+                        }
+
+                        if (currentTitle) {
+
+                            const modelName = currentTitle
+                                .replace(/[-].*$/, "")
+                                .trim();
+
+                            const searchUrl =
+                                `${BASE_URL}/srv/service/product/searchAll/${encodeURIComponent(modelName)}?language=tr`;
+
+                            const searchResponse = await axios.get(searchUrl);
+
+                            products = searchResponse.data.products || [];
+
+                        }
+
+                    }
+
+                    if (!products.length) return;
+
+                    //------------------------------------------
+                    // Grup adı
+                    //------------------------------------------
+
+                    const first = products[0];
+
+                    const title =
+                        first.TITLE ||
+                        first.title ||
+                        "";
+
+                    const modelName = title
+                        .replace(/[-].*$/, "")
+                        .trim();
+
+                    groups[modelName] = products;
+
+                }
+
+                catch (err) {
+
+                    console.log(
+                        "Related Error:",
+                        productId,
+                        err.message
+                    );
+
+                }
+
+            })
+
+        );
+
+        res.json({
+
+            success: true,
+
+            totalGroups: Object.keys(groups).length,
+
+            groups
+
+        });
+
+    }
+
+    catch (e) {
+
+        res.status(500).json({
+
+            success: false,
+
+            error: e.message
+
+        });
+
+    }
+
+});
+
+
+/*
+|--------------------------------------------------------------------------
 | HTML TEST
 |--------------------------------------------------------------------------
 */
@@ -180,14 +223,16 @@ app.get("/model-page", async (req, res) => {
         const model = req.query.model;
 
         if (!model) {
+
             return res.status(400).json({
                 success: false,
                 message: "model parametresi gerekli."
             });
+
         }
 
         const url =
-            `https://eu.mercanoptik.com/${link}?model=${model}`;
+            `${BASE_URL}/${link}?model=${model}`;
 
         const response = await axios.get(url, {
 
@@ -196,11 +241,16 @@ app.get("/model-page", async (req, res) => {
             transformResponse: data => data,
 
             headers: {
+
                 "User-Agent":
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/149 Safari/537.36",
+
                 "Accept": "text/html",
+
                 "Accept-Language": "tr-TR,tr;q=0.9",
-                "Referer": `https://eu.mercanoptik.com/${link}`
+
+                "Referer": `${BASE_URL}/${link}`
+
             }
 
         });
@@ -238,7 +288,9 @@ app.get("/model-page", async (req, res) => {
 
         });
 
-    } catch (e) {
+    }
+
+    catch (e) {
 
         res.status(500).json({
 
@@ -252,8 +304,11 @@ app.get("/model-page", async (req, res) => {
 
 });
 
+
 const PORT = process.env.PORT || 3333;
 
 app.listen(PORT, () => {
-    console.log(`🚀 API çalışıyor: ${PORT}`);
+
+    console.log(`🚀 API çalışıyor : ${PORT}`);
+
 });
