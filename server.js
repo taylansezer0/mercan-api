@@ -108,13 +108,21 @@ app.get("/model-page", async (req, res) => {
         });
 
         const $ = cheerio.load(response.data);
-
-        const products = $('[data-toggle="product"]');
-
+            
+        const products = [];
+            
+        $('[data-toggle="product"]').each((i, el) => {
+            products.push({
+                id: $(el).attr('data-id'),
+                title: $(el).find('[data-toggle="product-title"]').text().trim(),
+                href: $(el).find('[data-toggle="product-url"]').attr('href')
+            });
+        });
+        
         res.json({
             success: true,
             count: products.length,
-            first: products.first().toString()
+            products
         });
 
     } catch (e) {
