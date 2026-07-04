@@ -198,13 +198,18 @@ async function loadModelHtml(link, modelId) {
         return cached;
     }
 
-    const response = await http.get(`/${link}`, {
-        params: {
-            model: modelId
-        },
-        responseType: "text",
-        transformResponse: d => d
-    });
+    const response = await http.get(
+        "/api/storefront/block/page/715/products",
+        {
+            params: {
+                link,
+                model: modelId,
+                language: "tr"
+            },
+            responseType: "text",
+            transformResponse: d => d
+        }
+    );
 
     const html = response.data || "";
 
