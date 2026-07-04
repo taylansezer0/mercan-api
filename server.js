@@ -188,9 +188,9 @@ async function resolveModel(productId, models) {
 |--------------------------------------------------------------------------
 */
 
-async function loadModelHtml(link, modelId) {
+async function loadModelHtml(blockId, link, modelId) {
 
-    const cacheKey = `html_${link}_${modelId}`;
+    const cacheKey = `html_${blockId}_${link}_${modelId}`;
 
     const cached = getCache(cacheKey);
 
@@ -199,7 +199,7 @@ async function loadModelHtml(link, modelId) {
     }
 
     const response = await http.get(
-        "/api/storefront/block/page/715/products",
+        `/api/storefront/block/page/${blockId}/products`,
         {
             params: {
                 link,
@@ -229,9 +229,8 @@ function parseProductCards(html) {
 
     const $ = cheerio.load(html);
 
-    const ids = new Set();
-
     const cards = [];
+    const ids = new Set();
 
     $('[data-toggle="product"]').each((i, el) => {
 
@@ -243,17 +242,17 @@ function parseProductCards(html) {
 
         ids.add(id);
 
-        cards.push({
-
-            id,
-
-            html: $.html(el)
-
-        });
+        cards.push($.html(el));
 
     });
 
-    return cards;
+    return {
+
+        total: cards.length,
+
+        html: cards.join("\n")
+
+    };
 
 }
 
@@ -263,19 +262,15 @@ function parseProductCards(html) {
 |--------------------------------------------------------------------------
 */
 
-async function getModelCards(link, modelId) {
+async function getModelCards(blockId, link, modelId) {
 
-    const html = await loadModelHtml(link, modelId);
+    const html = await loadModelHtml(
+        blockId,
+        link,
+        modelId
+    );
 
-    const cards = parseProductCards(html);
-
-    return {
-
-        total: cards.length,
-
-        cards
-
-    };
+    return parseProductCards(html);
 
 }
 
@@ -290,21 +285,21 @@ app.post("/grouped-products", async (req, res) => {
     try {
 
         const {
-
+        
             productIds = [],
-            link = "koleksiyonlar"
-
+            link = "koleksiyonlar",
+            blockId
+        
         } = req.body;
 
-        if (!productIds.length) {
-
+        if (!blockId) {
+        
             return res.status(400).json({
                 success: false,
-                message: "productIds boş."
+                message: "blockId gerekli."
             });
-
+        
         }
-
         //------------------------------------------
         // Model listesi
         //------------------------------------------
@@ -348,14 +343,16 @@ app.post("/grouped-products", async (req, res) => {
             // Kartları getir
             //------------------------------------------
 
+
             const result = await getModelCards(
-
+            
+                blockId,
+            
                 link,
-
+            
                 modelInfo.modelId
-
+            
             );
-
             items.push({
 
                 model: modelInfo.model,
@@ -364,9 +361,7 @@ app.post("/grouped-products", async (req, res) => {
 
                 total: result.total,
 
-                html: result.cards
-                    .map(x => x.html)
-                    .join("\n")
+                html: result.html
 
             });
 
