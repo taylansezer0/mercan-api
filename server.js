@@ -10,16 +10,394 @@ app.use(express.json());
 
 const BASE_URL = "https://eu.mercanoptik.com";
 
-app.get("/", (req, res) => {
-    res.json({
-        success: true,
-        message: "Mercan API Çalışıyor 🚀"
+const http = axios.create({
+    baseURL: BASE_URL,
+    timeout: 30000,
+    headers: {
+        "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/149 Safari/537.36",
+        "Accept-Language": "tr-TR,tr;q=0.9"
+    }
+});
+
+const cache = new Map();
+
+function getCache(key) {
+
+    const item = cache.get(key);
+
+    if (!item) return null;
+
+    if (Date.now() > item.expire) {
+
+        cache.delete(key);
+
+        return null;
+
+    }
+
+    return item.data;
+
+}
+
+function setCache(key, data, ttl = 1000 * 60 * 5) {
+
+    cache.set(key, {
+
+        expire: Date.now() + ttl,
+
+        data
+
     });
+
+}
+
+function modelName(title = "") {
+
+    return title
+        .replace(/[-].*$/, "")
+        .trim();
+
+}
+
+app.get("/", (req, res) => {
+
+    res.json({
+
+        success: true,
+
+        message: "Mercan API v3"
+
+    });
+
 });
 
 /*
 |--------------------------------------------------------------------------
-| SearchAll
+| Servisler
+|--------------------------------------------------------------------------
+*/
+
+async function getModelList(link = "koleksiyonlar") {
+
+    const cacheKey = `models_${link}`;
+
+    const cached = getCache(cacheKey);
+
+    if (cached) {
+        return cached;
+    }
+
+    const response = await http.get(
+        "/srv/service/filter/get/filters-variants-categories-brands-price-models-suppliers",
+        {
+            params: {
+                link,
+                language: "tr",
+                currency: "TL"
+            }
+        }
+    );
+
+    const models = response.data.MODELS || [];
+
+    setCache(cacheKey, models, 1000 * 60 * 30);
+
+    return models;
+
+}
+
+async function getRelatedProducts(productId) {
+
+    const response = await http.get(
+        `/srv/service/product/get-related-products/${productId}/1`
+    );
+
+    return response.data.PRODUCTS || [];
+
+}
+
+async function searchAll(model) {
+
+    const response = await http.get(
+        `/srv/service/product/searchAll/${encodeURIComponent(model)}`,
+        {
+            params: {
+                language: "tr"
+            }
+        }
+    );
+
+    return response.data.products || [];
+
+}
+
+function getModelId(models, model) {
+
+    const item = models.find(x => x.NAME === model);
+
+    return item ? item.ID : null;
+
+}
+
+async function resolveModel(productId, models) {
+
+    let products = await getRelatedProducts(productId);
+
+    if (products.length <= 1) {
+
+        const current = products[0];
+
+        if (current?.TITLE) {
+
+            products = await searchAll(
+                modelName(current.TITLE)
+            );
+
+        }
+
+    }
+
+    if (!products.length) {
+        return null;
+    }
+
+    const first = products[0];
+
+    const model = modelName(
+        first.TITLE || first.title || ""
+    );
+
+    return {
+
+        productId,
+
+        model,
+
+        modelId: getModelId(models, model),
+
+        totalProducts: products.length
+
+    };
+
+}
+
+/*
+|--------------------------------------------------------------------------
+| HTML Loader
+|--------------------------------------------------------------------------
+*/
+
+async function loadModelHtml(link, modelId) {
+
+    const cacheKey = `html_${link}_${modelId}`;
+
+    const cached = getCache(cacheKey);
+
+    if (cached) {
+        return cached;
+    }
+
+    const response = await http.get(`/${link}`, {
+        params: {
+            model: modelId
+        },
+        responseType: "text",
+        transformResponse: d => d
+    });
+
+    const html = response.data || "";
+
+    setCache(cacheKey, html);
+
+    return html;
+
+}
+
+/*
+|--------------------------------------------------------------------------
+| Product Card Parser
+|--------------------------------------------------------------------------
+*/
+
+function parseProductCards(html) {
+
+    const $ = cheerio.load(html);
+
+    const ids = new Set();
+
+    const cards = [];
+
+    $('[data-toggle="product"]').each((i, el) => {
+
+        const id = $(el).attr("data-id");
+
+        if (!id) return;
+
+        if (ids.has(id)) return;
+
+        ids.add(id);
+
+        cards.push({
+
+            id,
+
+            html: $.html(el)
+
+        });
+
+    });
+
+    return cards;
+
+}
+
+/*
+|--------------------------------------------------------------------------
+| Model HTML
+|--------------------------------------------------------------------------
+*/
+
+async function getModelCards(link, modelId) {
+
+    const html = await loadModelHtml(link, modelId);
+
+    const cards = parseProductCards(html);
+
+    return {
+
+        total: cards.length,
+
+        cards
+
+    };
+
+}
+
+/*
+|--------------------------------------------------------------------------
+| GROUPED PRODUCTS
+|--------------------------------------------------------------------------
+*/
+
+app.post("/grouped-products", async (req, res) => {
+
+    try {
+
+        const {
+
+            productIds = [],
+            link = "koleksiyonlar"
+
+        } = req.body;
+
+        if (!productIds.length) {
+
+            return res.status(400).json({
+                success: false,
+                message: "productIds boş."
+            });
+
+        }
+
+        //------------------------------------------
+        // Model listesi
+        //------------------------------------------
+
+        const models = await getModelList(link);
+
+        //------------------------------------------
+        // Aynı modeli iki kez işleme
+        //------------------------------------------
+
+        const visited = new Set();
+
+        //------------------------------------------
+        // Sonuç
+        //------------------------------------------
+
+        const items = [];
+
+        for (const productId of productIds) {
+
+            const modelInfo = await resolveModel(
+                productId,
+                models
+            );
+
+            if (!modelInfo) {
+                continue;
+            }
+
+            if (!modelInfo.modelId) {
+                continue;
+            }
+
+            if (visited.has(modelInfo.modelId)) {
+                continue;
+            }
+
+            visited.add(modelInfo.modelId);
+
+            //------------------------------------------
+            // Kartları getir
+            //------------------------------------------
+
+            const result = await getModelCards(
+
+                link,
+
+                modelInfo.modelId
+
+            );
+
+            items.push({
+
+                model: modelInfo.model,
+
+                modelId: modelInfo.modelId,
+
+                total: result.total,
+
+                html: result.cards
+                    .map(x => x.html)
+                    .join("\n")
+
+            });
+
+        }
+
+        res.json({
+
+            success: true,
+
+            totalModels: items.length,
+
+            items
+
+        });
+
+    }
+
+    catch (err) {
+
+        console.error(err);
+
+        res.status(500).json({
+
+            success: false,
+
+            error: err.message
+
+        });
+
+    }
+
+});
+
+/*
+|--------------------------------------------------------------------------
+| MODELS
 |--------------------------------------------------------------------------
 */
 
@@ -27,52 +405,72 @@ app.post("/models", async (req, res) => {
 
     try {
 
-        const models = req.body.models || [];
+        const {
+
+            models = []
+
+        } = req.body;
 
         if (!models.length) {
+
             return res.status(400).json({
+
                 success: false,
-                message: "Model listesi boş."
+
+                message: "models boş."
+
             });
+
         }
 
-        const groups = {};
+        const result = [];
 
-        await Promise.all(
+        for (const model of models) {
 
-            models.map(async (model) => {
+            const products = await searchAll(model);
 
-                const url =
-                    `${BASE_URL}/srv/service/product/searchAll/${encodeURIComponent(model)}?language=tr`;
+            result.push({
 
-                const response = await axios.get(url);
+                model,
 
-                groups[model] = response.data.products || [];
+                total: products.length,
 
-            })
+                products
 
-        );
+            });
+
+        }
 
         res.json({
+
             success: true,
-            groups
+
+            total: result.length,
+
+            items: result
+
         });
 
-    } catch (e) {
+    }
+
+    catch (err) {
+
+        console.error(err);
 
         res.status(500).json({
+
             success: false,
-            error: e.message
+
+            error: err.message
+
         });
 
     }
 
 });
-
-
 /*
 |--------------------------------------------------------------------------
-| Related Products
+| RELATED PRODUCTS
 |--------------------------------------------------------------------------
 */
 
@@ -80,109 +478,51 @@ app.post("/related-products", async (req, res) => {
 
     try {
 
-        const productIds = req.body.productIds || [];
+        const {
+
+            productIds = [],
+            link = "koleksiyonlar"
+
+        } = req.body;
 
         if (!productIds.length) {
+
             return res.status(400).json({
+
                 success: false,
+
                 message: "productIds boş."
+
             });
+
         }
 
-        //---------------------------------------
-        // Model listesini 1 kez al
-        //---------------------------------------
-
-        const filterResponse = await axios.get(
-            `${BASE_URL}/srv/service/filter/get/filters-variants-categories-brands-price-models-suppliers?link=koleksiyonlar&language=tr&currency=TL`
-        );
-
-        const models = filterResponse.data.MODELS || [];
+        const models = await getModelList(link);
 
         const items = [];
 
-        await Promise.all(
+        const visited = new Set();
 
-            productIds.map(async (productId) => {
+        for (const productId of productIds) {
 
-                try {
+            const modelInfo = await resolveModel(
+                productId,
+                models
+            );
 
-                    const relatedUrl =
-                        `${BASE_URL}/srv/service/product/get-related-products/${productId}/1`;
+            if (!modelInfo) {
+                continue;
+            }
 
-                    const relatedResponse = await axios.get(relatedUrl);
+            if (visited.has(modelInfo.model)) {
+                continue;
+            }
 
-                    let products = relatedResponse.data.PRODUCTS || [];
+            visited.add(modelInfo.model);
 
-                    //----------------------------------
-                    // related yoksa searchAll fallback
-                    //----------------------------------
+            items.push(modelInfo);
 
-                    if (products.length <= 1) {
-
-                        let currentTitle = "";
-
-                        if (products.length) {
-                            currentTitle = products[0].TITLE || "";
-                        }
-
-                        if (currentTitle) {
-
-                            const modelName = currentTitle
-                                .replace(/[-].*$/, "")
-                                .trim();
-
-                            const searchResponse = await axios.get(
-                                `${BASE_URL}/srv/service/product/searchAll/${encodeURIComponent(modelName)}?language=tr`
-                            );
-
-                            products = searchResponse.data.products || [];
-                        }
-
-                    }
-
-                    if (!products.length) return;
-
-                    //----------------------------------
-                    // Model adı
-                    //----------------------------------
-
-                    const first = products[0];
-
-                    const modelName =
-                        (first.TITLE || first.title || "")
-                            .replace(/[-].*$/, "")
-                            .trim();
-
-                    //----------------------------------
-                    // Model ID
-                    //----------------------------------
-
-                    const modelInfo = models.find(x => x.NAME === modelName);
-
-                    items.push({
-
-                        productId,
-
-                        model: modelName,
-
-                        modelId: modelInfo ? modelInfo.ID : null,
-
-                        totalProducts: products.length
-
-                    });
-
-                }
-
-                catch (err) {
-
-                    console.log(productId, err.message);
-
-                }
-
-            })
-
-        );
+        }
 
         res.json({
 
@@ -196,116 +536,27 @@ app.post("/related-products", async (req, res) => {
 
     }
 
-    catch (e) {
+    catch (err) {
+
+        console.error(err);
 
         res.status(500).json({
 
             success: false,
 
-            error: e.message
+            error: err.message
 
         });
 
     }
 
 });
-
 
 /*
 |--------------------------------------------------------------------------
-| HTML TEST
+| START SERVER
 |--------------------------------------------------------------------------
 */
-
-app.get("/model-page", async (req, res) => {
-
-    try {
-
-        const link = req.query.link || "koleksiyonlar";
-        const model = req.query.model;
-
-        if (!model) {
-
-            return res.status(400).json({
-                success: false,
-                message: "model parametresi gerekli."
-            });
-
-        }
-
-        const url =
-            `${BASE_URL}/${link}?model=${model}`;
-
-        const response = await axios.get(url, {
-
-            responseType: "text",
-
-            transformResponse: data => data,
-
-            headers: {
-
-                "User-Agent":
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/149 Safari/537.36",
-
-                "Accept": "text/html",
-
-                "Accept-Language": "tr-TR,tr;q=0.9",
-
-                "Referer": `${BASE_URL}/${link}`
-
-            }
-
-        });
-
-        const $ = cheerio.load(response.data);
-
-        const products = [];
-
-        $('[data-toggle="product"]').each((i, el) => {
-
-            products.push({
-
-                id: $(el).attr("data-id"),
-
-                title: $(el)
-                    .find('[data-toggle="product-title"]')
-                    .text()
-                    .trim(),
-
-                href: $(el)
-                    .find('[data-toggle="product-url"]')
-                    .attr("href")
-
-            });
-
-        });
-
-        res.json({
-
-            success: true,
-
-            count: products.length,
-
-            products
-
-        });
-
-    }
-
-    catch (e) {
-
-        res.status(500).json({
-
-            success: false,
-
-            error: e.message
-
-        });
-
-    }
-
-});
-
 
 const PORT = process.env.PORT || 3333;
 
