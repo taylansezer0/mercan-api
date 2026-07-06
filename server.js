@@ -1,14 +1,29 @@
+function log(...text) {
+
+    console.log(
+        `[${new Date().toLocaleTimeString()}]`,
+        ...text
+    );
+
+}
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
 const cheerio = require("cheerio");
-
+const MAX_PAGE = 500;
 const app = express();
 
 app.use(cors());
 app.use(express.json());
 
 const BASE_URL = "https://eu.mercanoptik.com";
+const CATEGORY_CACHE_TIME = 1000 * 60 * 30; // 30 dakika
+
+const MODEL_CACHE_TIME = 1000 * 60 * 30; // 30 dakika
+
+const HTML_CACHE_TIME = 1000 * 60 * 30; // 30 dakika
+
+const BATCH_SIZE = 20;
 
 const http = axios.create({
     baseURL: BASE_URL,
@@ -39,8 +54,52 @@ function getCache(key) {
     return item.data;
 
 }
+const pendingCache = new Map();
 
-function setCache(key, data, ttl = 1000 * 60 * 5) {
+async function remember(key, ttl, callback) {
+
+    const cached = getCache(key);
+
+    if (cached) {
+        return cached;
+    }
+
+    if (pendingCache.has(key)) {
+
+        console.log("⏳ Cache bekleniyor:", key);
+
+        return await pendingCache.get(key);
+
+    }
+
+    const promise = (async () => {
+
+        try {
+
+            const data = await callback();
+
+            setCache(key, data, ttl);
+
+            return data;
+
+        }
+
+        finally {
+
+            pendingCache.delete(key);
+
+        }
+
+    })();
+
+    pendingCache.set(key, promise);
+
+    return await promise;
+
+}
+
+
+function setCache(key, data, ttl = 1000 * 60 * 30) {
 
     cache.set(key, {
 
@@ -51,7 +110,115 @@ function setCache(key, data, ttl = 1000 * 60 * 5) {
     });
 
 }
+async function getCategoryProducts(blockId, link, page = 1) {
 
+    const response = await http.get(
+        `/api/storefront/block/page/${blockId}/products`,
+        {
+            params: {
+                link,
+                pg: page,
+                language: "tr"
+            },
+            responseType: "text",
+            transformResponse: d => d
+        }
+    );
+
+    return response.data || "";
+
+}
+async function getAllCategoryProducts(blockId, link) {
+
+    const cacheKey = `category_${blockId}_${link}`;
+
+    return remember(
+
+        cacheKey,
+
+        CATEGORY_CACHE_TIME,
+
+        async () => {
+
+            const products = [];
+            const ids = new Set();
+
+            let page = 1;
+
+            while (page <= MAX_PAGE) {
+
+                log(`📄 Sayfa ${page} okunuyor...`);
+
+                const html = await getCategoryProducts(
+                    blockId,
+                    link,
+                    page
+                );
+
+                const $ = cheerio.load(html);
+
+                const cards = $('[data-toggle="product"][data-id]');
+
+                if (!cards.length) {
+
+                    log("🏁 Son sayfaya ulaşıldı.");
+
+                    break;
+
+                }
+
+                let added = 0;
+
+                cards.each((i, el) => {
+
+                    const id = $(el).attr("data-id");
+
+                    if (!id) return;
+
+                    if (ids.has(id)) return;
+
+                    ids.add(id);
+
+                    products.push({
+
+                        id,
+
+                        title: $(el)
+                            .find('[data-toggle="product-title"]')
+                            .text()
+                            .trim()
+
+                    });
+
+                    added++;
+
+                });
+
+                log(`✔ Sayfa ${page}: ${added} ürün`);
+
+                if (added < 24) {
+                    log("🏁 Son sayfaya ulaşıldı.");
+                    break;
+                }
+
+                page++;
+
+            }
+
+            if (page > MAX_PAGE) {
+
+                log(`⚠ Maksimum sayfa limitine (${MAX_PAGE}) ulaşıldı.`);
+                        
+            }
+            log(`🎉 Toplam ${products.length} ürün bulundu.`);
+
+            return products;
+
+        }
+
+    );
+
+}
 function modelName(title = "") {
 
     return title
@@ -82,28 +249,26 @@ async function getModelList(link = "koleksiyonlar") {
 
     const cacheKey = `models_${link}`;
 
-    const cached = getCache(cacheKey);
+    return remember(
+        cacheKey,
+        MODEL_CACHE_TIME,
+        async () => {
 
-    if (cached) {
-        return cached;
-    }
+            const response = await http.get(
+                "/srv/service/filter/get/filters-variants-categories-brands-price-models-suppliers",
+                {
+                    params: {
+                        link,
+                        language: "tr",
+                        currency: "TL"
+                    }
+                }
+            );
 
-    const response = await http.get(
-        "/srv/service/filter/get/filters-variants-categories-brands-price-models-suppliers",
-        {
-            params: {
-                link,
-                language: "tr",
-                currency: "TL"
-            }
+            return response.data.MODELS || [];
+
         }
     );
-
-    const models = response.data.MODELS || [];
-
-    setCache(cacheKey, models, 1000 * 60 * 30);
-
-    return models;
 
 }
 
@@ -192,30 +357,43 @@ async function loadModelHtml(blockId, link, modelId) {
 
     const cacheKey = `html_${blockId}_${link}_${modelId}`;
 
-    const cached = getCache(cacheKey);
+    return remember(
 
-    if (cached) {
-        return cached;
-    }
+        cacheKey,
 
-    const response = await http.get(
-        `/api/storefront/block/page/${blockId}/products`,
-        {
-            params: {
-                link,
-                model: modelId,
-                language: "tr"
-            },
-            responseType: "text",
-            transformResponse: d => d
+        HTML_CACHE_TIME,
+
+        async () => {
+
+            const response = await http.get(
+
+                `/api/storefront/block/page/${blockId}/products`,
+
+                {
+
+                    params: {
+
+                        link,
+
+                        model: modelId,
+
+                        language: "tr"
+
+                    },
+
+                    responseType: "text",
+
+                    transformResponse: d => d
+
+                }
+
+            );
+
+            return response.data || "";
+
         }
+
     );
-
-    const html = response.data || "";
-
-    setCache(cacheKey, html);
-
-    return html;
 
 }
 
@@ -273,7 +451,29 @@ async function getModelCards(blockId, link, modelId) {
     return parseProductCards(html);
 
 }
+async function processBatch(items, size, callback) {
 
+    const result = [];
+
+    for (let i = 0; i < items.length; i += size) {
+
+        const batch = items.slice(i, i + size);
+
+        log(
+            `📦 Batch ${Math.floor(i / size) + 1} / ${Math.ceil(items.length / size)}`
+        );
+
+        const data = await Promise.all(
+            batch.map(callback)
+        );
+
+        result.push(...data);
+
+    }
+
+    return result;
+
+}
 /*
 |--------------------------------------------------------------------------
 | GROUPED PRODUCTS
@@ -285,87 +485,126 @@ app.post("/grouped-products", async (req, res) => {
     try {
 
         const {
-        
-            productIds = [],
-            link = "koleksiyonlar",
-            blockId
-        
+
+            blockId,
+            link = "koleksiyonlar"
+
         } = req.body;
 
         if (!blockId) {
-        
+
             return res.status(400).json({
                 success: false,
                 message: "blockId gerekli."
             });
-        
+
         }
-        //------------------------------------------
-        // Model listesi
-        //------------------------------------------
 
-        const models = await getModelList(link);
+        //----------------------------------------
+        // Cache'li kategori ürünleri
+        //----------------------------------------
 
-        //------------------------------------------
-        // Aynı modeli iki kez işleme
-        //------------------------------------------
+        const products = await getAllCategoryProducts(
+            blockId,
+            link
+        );
 
-        const visited = new Set();
+        if (!products.length) {
 
-        //------------------------------------------
-        // Sonuç
-        //------------------------------------------
-
-        const items = [];
-
-        for (const productId of productIds) {
-
-            const modelInfo = await resolveModel(
-                productId,
-                models
-            );
-
-            if (!modelInfo) {
-                continue;
-            }
-
-            if (!modelInfo.modelId) {
-                continue;
-            }
-
-            if (visited.has(modelInfo.modelId)) {
-                continue;
-            }
-
-            visited.add(modelInfo.modelId);
-
-            //------------------------------------------
-            // Kartları getir
-            //------------------------------------------
-
-
-            const result = await getModelCards(
-            
-                blockId,
-            
-                link,
-            
-                modelInfo.modelId
-            
-            );
-            items.push({
-
-                model: modelInfo.model,
-
-                modelId: modelInfo.modelId,
-
-                total: result.total,
-
-                html: result.html
-
+            return res.json({
+                success: true,
+                totalModels: 0,
+                items: []
             });
 
         }
+
+        //----------------------------------------
+        // Model listesi
+        //----------------------------------------
+
+        const models = await getModelList(link);
+
+        //----------------------------------------
+        // Gruplar
+        //----------------------------------------
+
+        const groups = new Map();
+
+        for (const product of products) {
+
+            const model = modelName(product.title);
+
+            if (!model) continue;
+
+            if (!groups.has(model)) {
+
+                const modelInfo = models.find(
+                    x => x.NAME === model
+                );
+
+                groups.set(model, {
+
+                    model,
+
+                    modelId: modelInfo
+                        ? modelInfo.ID
+                        : null,
+
+                    totalProducts: 0
+
+                });
+
+            }
+
+            groups.get(model).totalProducts++;
+
+        }
+
+        //----------------------------------------
+        // HTML'leri çek
+        //----------------------------------------
+
+        const items = (
+            await processBatch(
+            
+                [...groups.values()],
+            
+                BATCH_SIZE,
+            
+                async group => {
+                
+                    if (!group.modelId) {
+                        return null;
+                    }
+                
+                    const result = await getModelCards(
+                    
+                        blockId,
+                    
+                        link,
+                    
+                        group.modelId
+                    
+                    );
+                
+                    return {
+                    
+                        model: group.model,
+                    
+                        modelId: group.modelId,
+                    
+                        total: group.totalProducts,
+                    
+                        html: result.html
+                    
+                    };
+                
+                }
+            
+            )
+        
+        ).filter(Boolean);
 
         res.json({
 
@@ -394,7 +633,6 @@ app.post("/grouped-products", async (req, res) => {
     }
 
 });
-
 /*
 |--------------------------------------------------------------------------
 | MODELS
@@ -562,6 +800,6 @@ const PORT = process.env.PORT || 3333;
 
 app.listen(PORT, () => {
 
-    console.log(`🚀 API çalışıyor : ${PORT}`);
+    log(`🚀 API çalışıyor : ${PORT}`);
 
 });
