@@ -15,16 +15,17 @@ app.use(express.json({ limit: "2mb" }));
 */
 
 const BASE_URL = "https://eu.mercanoptik.com";
+
 const CATEGORY_CACHE_TIME = 1000 * 60 * 30; // 30 dakika
 const MODEL_CACHE_TIME = 1000 * 60 * 30; // 30 dakika
-const SEARCH_CACHE_TIME = 1000 * 60 * 30; // 30 dakika
-const PAGE_BATCH_SIZE = 5;
-const PAGE_SIZE = 24;
-const MAX_PAGE = 500;
+const RELATED_CACHE_TIME = 1000 * 60 * 30; // 30 dakika
 
-function log(...text) {
-    console.log(`[${new Date().toLocaleTimeString()}]`, ...text);
-}
+const PAGE_BATCH_SIZE = 5;
+const MAX_PAGE = 500;
+const DEFAULT_LINK = "koleksiyonlar";
+const DEFAULT_LANGUAGE = "tr";
+const DEFAULT_CURRENCY = "TL";
+const PRODUCTS_PER_PAGE = 24;
 
 const http = axios.create({
     baseURL: BASE_URL,
@@ -38,7 +39,17 @@ const http = axios.create({
 
 /*
 |--------------------------------------------------------------------------
-| Cache + Lock
+| Log
+|--------------------------------------------------------------------------
+*/
+
+function log(...text) {
+    console.log(`[${new Date().toLocaleTimeString()}]`, ...text);
+}
+
+/*
+|--------------------------------------------------------------------------
+| Memory Cache + Pending Lock
 |--------------------------------------------------------------------------
 */
 
@@ -68,7 +79,9 @@ function setCache(key, data, ttl = CATEGORY_CACHE_TIME) {
 async function remember(key, ttl, callback) {
     const cached = getCache(key);
 
-    if (cached) return cached;
+    if (cached) {
+        return cached;
+    }
 
     if (pendingCache.has(key)) {
         log("⏳ Cache bekleniyor:", key);
@@ -95,27 +108,50 @@ async function remember(key, ttl, callback) {
 |--------------------------------------------------------------------------
 */
 
+function normalizeLink(link = DEFAULT_LINK) {
+    return String(link || DEFAULT_LINK).replace(/^\/+|\/+$/g, "") || DEFAULT_LINK;
+}
+
+function normalizeId(id) {
+    return String(id || "").trim();
+}
+
 function modelName(title = "") {
-    return String(title)
+    return String(title || "")
         .replace(/[-].*$/, "")
         .trim();
 }
 
-function normalizeLink(link = "koleksiyonlar") {
-    return String(link || "koleksiyonlar")
-        .replace(/^\/+|\/+$/g, "") || "koleksiyonlar";
+function uniqueArray(items) {
+    return Array.from(new Set(items));
 }
 
-function uniqByModel(items) {
-    const map = new Map();
+function getCardTitle($, el) {
+    const title = $(el).find('[data-toggle="product-title"]').text().trim();
 
-    items.forEach(item => {
-        if (!item || !item.model) return;
-        if (!map.has(item.model)) map.set(item.model, item);
+    if (title) return title;
+
+    return (
+        $(el).find('[data-toggle="product-url"]').attr("title") ||
+        $(el).attr("title") ||
+        ""
+    ).trim();
+}
+
+/*
+|--------------------------------------------------------------------------
+| Home
+|--------------------------------------------------------------------------
+*/
+
+app.get("/", (req, res) => {
+    res.json({
+        success: true,
+        message: "Mercan API Çalışıyor 🚀",
+        version: "6.0.0",
+        mode: "data-only-grouping"
     });
-
-    return [...map.values()];
-}
+});
 
 /*
 |--------------------------------------------------------------------------
@@ -123,18 +159,18 @@ function uniqByModel(items) {
 |--------------------------------------------------------------------------
 */
 
-async function getModelList(link = "koleksiyonlar") {
-    link = normalizeLink(link);
-    const cacheKey = `models_${link}`;
+async function getModelList(link = DEFAULT_LINK) {
+    const normalizedLink = normalizeLink(link);
+    const cacheKey = `models_${normalizedLink}`;
 
     return remember(cacheKey, MODEL_CACHE_TIME, async () => {
         const response = await http.get(
             "/srv/service/filter/get/filters-variants-categories-brands-price-models-suppliers",
             {
                 params: {
-                    link,
-                    language: "tr",
-                    currency: "TL"
+                    link: normalizedLink,
+                    language: DEFAULT_LANGUAGE,
+                    currency: DEFAULT_CURRENCY
                 }
             }
         );
@@ -144,28 +180,29 @@ async function getModelList(link = "koleksiyonlar") {
 }
 
 async function getRelatedProducts(productId) {
-    const response = await http.get(
-        `/srv/service/product/get-related-products/${productId}/1`
-    );
+    const id = normalizeId(productId);
+    const cacheKey = `related_${id}`;
 
-    return response.data.PRODUCTS || [];
+    return remember(cacheKey, RELATED_CACHE_TIME, async () => {
+        const response = await http.get(
+            `/srv/service/product/get-related-products/${encodeURIComponent(id)}/1`
+        );
+
+        return response.data.PRODUCTS || [];
+    });
 }
 
 async function searchAll(model) {
-    const cacheKey = `search_${model}`;
-
-    return remember(cacheKey, SEARCH_CACHE_TIME, async () => {
-        const response = await http.get(
-            `/srv/service/product/searchAll/${encodeURIComponent(model)}`,
-            {
-                params: {
-                    language: "tr"
-                }
+    const response = await http.get(
+        `/srv/service/product/searchAll/${encodeURIComponent(model)}`,
+        {
+            params: {
+                language: DEFAULT_LANGUAGE
             }
-        );
+        }
+    );
 
-        return response.data.products || [];
-    });
+    return response.data.products || [];
 }
 
 function getModelId(models, model) {
@@ -184,7 +221,9 @@ async function resolveModel(productId, models) {
         }
     }
 
-    if (!products.length) return null;
+    if (!products.length) {
+        return null;
+    }
 
     const first = products[0];
     const model = modelName(first.TITLE || first.title || "");
@@ -199,92 +238,74 @@ async function resolveModel(productId, models) {
 
 /*
 |--------------------------------------------------------------------------
-| Category Page Fetch + Parser
+| Category Page Reader
 |--------------------------------------------------------------------------
 */
 
-async function fetchCategoryPageHtml(blockId, link, page = 1) {
-    try {
-        const response = await http.get(
-            `/api/storefront/block/page/${blockId}/products`,
-            {
-                params: {
-                    link,
-                    pg: page,
-                    language: "tr"
-                },
-                responseType: "text",
-                transformResponse: d => d,
-                validateStatus: status => status >= 200 && status < 500
-            }
-        );
+async function getCategoryProductsHtml(blockId, link, page = 1) {
+    const normalizedLink = normalizeLink(link);
 
-        if (response.status >= 400) {
-            log(`⚠ Sayfa ${page} HTTP ${response.status}`);
-            return "";
+    const response = await http.get(
+        `/api/storefront/block/page/${encodeURIComponent(blockId)}/products`,
+        {
+            params: {
+                link: normalizedLink,
+                pg: page,
+                language: DEFAULT_LANGUAGE
+            },
+            responseType: "text",
+            transformResponse: d => d,
+            validateStatus: status => status >= 200 && status < 500
         }
+    );
 
-        return response.data || "";
-    } catch (err) {
-        log(`⚠ Sayfa ${page} alınamadı:`, err.message);
+    if (response.status >= 400) {
         return "";
     }
+
+    return response.data || "";
 }
 
-function parseCardsFromPage(html, modelsMap, seenIds, groups) {
+function parseCategoryPage(html, page) {
     const $ = cheerio.load(html);
-    const cards = $('[data-toggle="product"][data-id]');
-    let added = 0;
+    const products = [];
 
-    cards.each((i, el) => {
-        const card = $(el);
-        const id = card.attr("data-id");
+    $('[data-toggle="product"][data-id]').each((i, el) => {
+        const id = normalizeId($(el).attr("data-id"));
+        const title = getCardTitle($, el);
+        const model = modelName(title);
 
-        if (!id || seenIds.has(id)) return;
+        if (!id || !title || !model) return;
 
-        const title = card.find('[data-toggle="product-title"]').text().trim();
-        const rawModel = card.attr("data-model") || modelName(title);
-        const model = String(rawModel || "").trim();
-
-        if (!model) return;
-
-        seenIds.add(id);
-
-        if (!groups.has(model)) {
-            groups.set(model, {
-                model,
-                modelId: modelsMap.get(model) || null,
-                total: 0,
-                html: []
-            });
-        }
-
-        const group = groups.get(model);
-        group.total += 1;
-        group.html.push($.html(el));
-        added += 1;
+        products.push({
+            id,
+            title,
+            model,
+            page
+        });
     });
 
-    return {
-        cardCount: cards.length,
-        added
-    };
+    return products;
 }
 
-async function buildGroupedCategory(blockId, link = "koleksiyonlar") {
-    link = normalizeLink(link);
-    const cacheKey = `grouped_v5_${blockId}_${link}`;
+async function readCategoryPages(blockId, link) {
+    const normalizedLink = normalizeLink(link);
+    const cacheKey = `category_groups_${blockId}_${normalizedLink}`;
 
     return remember(cacheKey, CATEGORY_CACHE_TIME, async () => {
-        const models = await getModelList(link);
-        const modelsMap = new Map(models.map(item => [item.NAME, item.ID]));
+        const requestStarted = Date.now();
+
+        log(`🚀 Kategori taraması başladı: block=${blockId}, link=${normalizedLink}`);
+
+        const models = await getModelList(normalizedLink);
+        const modelIdMap = new Map(models.map(item => [item.NAME, item.ID]));
+
+        const ids = new Set();
         const groups = new Map();
-        const seenIds = new Set();
+        const pagesRead = [];
 
         let page = 1;
         let finished = false;
-
-        log(`🚀 Kategori taraması başladı: block=${blockId}, link=${link}`);
 
         while (!finished && page <= MAX_PAGE) {
             const pages = [];
@@ -296,32 +317,65 @@ async function buildGroupedCategory(blockId, link = "koleksiyonlar") {
             log(`📦 Sayfalar okunuyor: ${pages.join(", ")}`);
 
             const results = await Promise.all(
-                pages.map(async currentPage => ({
-                    page: currentPage,
-                    html: await fetchCategoryPageHtml(blockId, link, currentPage)
-                }))
+                pages.map(async currentPage => {
+                    const html = await getCategoryProductsHtml(
+                        blockId,
+                        normalizedLink,
+                        currentPage
+                    );
+
+                    return {
+                        page: currentPage,
+                        products: parseCategoryPage(html, currentPage)
+                    };
+                })
             );
 
             for (const result of results) {
-                if (!result.html.trim()) {
+                const products = result.products;
+
+                if (!products.length) {
+                    log(`🏁 Sayfa ${result.page}: boş / son sayfa`);
                     finished = true;
-                    log(`🏁 Sayfa ${result.page}: boş cevap`);
                     break;
                 }
 
-                const parsed = parseCardsFromPage(result.html, modelsMap, seenIds, groups);
+                let added = 0;
 
-                log(`✔ Sayfa ${result.page}: ${parsed.added} yeni ürün / ${parsed.cardCount} kart`);
+                for (const product of products) {
+                    if (ids.has(product.id)) continue;
 
-                if (!parsed.cardCount || parsed.added === 0) {
-                    finished = true;
-                    log(`🏁 Sayfa ${result.page}: yeni ürün yok`);
-                    break;
+                    ids.add(product.id);
+                    added++;
+
+                    if (!groups.has(product.model)) {
+                        groups.set(product.model, {
+                            model: product.model,
+                            modelId: modelIdMap.get(product.model) || null,
+                            total: 0,
+                            productIds: [],
+                            pages: []
+                        });
+                    }
+
+                    const group = groups.get(product.model);
+                    group.total++;
+                    group.productIds.push(product.id);
+
+                    if (!group.pages.includes(product.page)) {
+                        group.pages.push(product.page);
+                    }
                 }
 
-                if (parsed.cardCount < PAGE_SIZE) {
-                    finished = true;
+                pagesRead.push(result.page);
+
+                log(
+                    `✔ Sayfa ${result.page}: ${added} yeni ürün / ${products.length} kart`
+                );
+
+                if (products.length < PRODUCTS_PER_PAGE) {
                     log(`🏁 Sayfa ${result.page}: son sayfa`);
+                    finished = true;
                     break;
                 }
             }
@@ -331,20 +385,33 @@ async function buildGroupedCategory(blockId, link = "koleksiyonlar") {
             log(`⚠ Maksimum sayfa limitine (${MAX_PAGE}) ulaşıldı.`);
         }
 
-        const items = [...groups.values()]
+        const items = Array.from(groups.values())
             .map(group => ({
-                model: group.model,
-                modelId: group.modelId,
-                total: group.total,
-                html: group.html.join("\n")
+                ...group,
+                productIds: uniqueArray(group.productIds),
+                pages: uniqueArray(group.pages).sort((a, b) => a - b)
             }))
-            .filter(item => item.total > 0);
+            .sort((a, b) => {
+                const firstPageA = a.pages[0] || 999999;
+                const firstPageB = b.pages[0] || 999999;
 
-        log(`🎉 Tarama tamamlandı: ${seenIds.size} ürün, ${items.length} model`);
+                if (firstPageA !== firstPageB) {
+                    return firstPageA - firstPageB;
+                }
+
+                return a.model.localeCompare(b.model, "tr");
+            });
+
+        const duration = Date.now() - requestStarted;
+
+        log(
+            `🎉 Tarama tamamlandı: ${ids.size} ürün, ${items.length} model, ${Math.round(duration / 1000)} sn`
+        );
 
         return {
-            totalProducts: seenIds.size,
+            totalProducts: ids.size,
             totalModels: items.length,
+            pagesRead,
             items
         };
     });
@@ -352,27 +419,20 @@ async function buildGroupedCategory(blockId, link = "koleksiyonlar") {
 
 /*
 |--------------------------------------------------------------------------
-| Routes
+| Endpoints
 |--------------------------------------------------------------------------
 */
 
-app.get("/", (req, res) => {
-    res.json({
-        success: true,
-        message: "Mercan API v5",
-        cacheMinutes: 30
-    });
-});
-
 app.post("/grouped-products", async (req, res) => {
     const requestId = Math.random().toString(36).slice(2, 8);
-    log(`🚀 Request başladı: ${requestId}`);
 
     try {
         const {
             blockId,
-            link = "koleksiyonlar"
+            link = DEFAULT_LINK
         } = req.body;
+
+        log(`🚀 Request başladı: ${requestId}`);
 
         if (!blockId) {
             return res.status(400).json({
@@ -381,14 +441,17 @@ app.post("/grouped-products", async (req, res) => {
             });
         }
 
-        const data = await buildGroupedCategory(blockId, link);
+        const data = await readCategoryPages(blockId, link);
 
         log(`✅ Request bitti: ${requestId}`);
 
         res.json({
             success: true,
+            blockId,
+            link: normalizeLink(link),
             totalProducts: data.totalProducts,
             totalModels: data.totalModels,
+            pagesRead: data.pagesRead,
             items: data.items
         });
     } catch (err) {
@@ -443,7 +506,7 @@ app.post("/related-products", async (req, res) => {
     try {
         const {
             productIds = [],
-            link = "koleksiyonlar"
+            link = DEFAULT_LINK
         } = req.body;
 
         if (!productIds.length) {
@@ -454,14 +517,18 @@ app.post("/related-products", async (req, res) => {
         }
 
         const models = await getModelList(link);
-        const resolved = [];
+        const items = [];
+        const visited = new Set();
 
         for (const productId of productIds) {
             const modelInfo = await resolveModel(productId, models);
-            if (modelInfo) resolved.push(modelInfo);
-        }
 
-        const items = uniqByModel(resolved);
+            if (!modelInfo) continue;
+            if (visited.has(modelInfo.model)) continue;
+
+            visited.add(modelInfo.model);
+            items.push(modelInfo);
+        }
 
         res.json({
             success: true,
@@ -480,7 +547,7 @@ app.post("/related-products", async (req, res) => {
 
 /*
 |--------------------------------------------------------------------------
-| Start Server
+| Start
 |--------------------------------------------------------------------------
 */
 
