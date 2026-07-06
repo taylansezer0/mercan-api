@@ -481,7 +481,9 @@ async function processBatch(items, size, callback) {
 */
 
 app.post("/grouped-products", async (req, res) => {
+    const requestId = Math.random().toString(36).slice(2, 8);
 
+    log(`🚀 Request başladı: ${requestId}`);
     try {
 
         const {
@@ -606,6 +608,8 @@ app.post("/grouped-products", async (req, res) => {
         
         ).filter(Boolean);
 
+        log(`✅ Request bitti: ${requestId}`);
+        
         res.json({
 
             success: true,
